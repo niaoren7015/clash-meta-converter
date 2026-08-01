@@ -2,6 +2,7 @@ import streamlit as st
 import yaml
 import requests
 import base64
+import copy
 from urllib.parse import unquote, parse_qs
 
 st.set_page_config(
@@ -10,92 +11,10 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛡️ Clash Meta (Mihomo) 终极全能订阅转换")
-st.caption("内嵌 100% 完整 ACL4SSR 策略组模板，彻底解决导入后只有 Global 的 Bug")
+st.title("🛡️ Clash Meta (Mihomo) 精准分流转换工具")
+st.caption("已完美修复自动选择逻辑、默认节点继承以及 B站/国内直连策略")
 
-# ==================== 1. 内嵌 ACL4SSR 策略与规则基底 ====================
-# 直接写死基础结构，保证下载的配置一定包含完整的策略组和 Rules 规则
-BASE_ACL4SSR_CONFIG = {
-    "mixed-port": 7890,
-    "allow-lan": True,
-    "mode": "rule",
-    "log-level": "info",
-    "external-controller": "127.0.0.1:9090",
-    "dns": {
-        "enable": True,
-        "enhanced-mode": "redir-host",
-        "nameserver": ["223.5.5.5", "119.29.29.29", "1.1.1.1"]
-    },
-    "proxy-groups": [
-        {"name": "🚀 节点选择", "type": "select", "proxies": ["📌 自动选择", "🎯 直连"]},
-        {"name": "📌 自动选择", "type": "url-test", "url": "http://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": []},
-        {"name": "📲 节点选择", "type": "select", "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"]},
-        {"name": "🎬 哔哩哔哩", "type": "select", "proxies": ["🎯 直连", "🚀 节点选择"]},
-        {"name": "📺 港台番剧", "type": "select", "proxies": ["🚀 节点选择", "🎯 直连"]},
-        {"name": "🎥 国外媒体", "type": "select", "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"]},
-        {"name": "🌍 谷歌服务", "type": "select", "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"]},
-        {"name": "📲 极简 Telegram", "type": "select", "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"]},
-        {"name": "🛑 广告拦截", "type": "select", "proxies": ["🛑 拦截", "🎯 直连", "🚀 节点选择"]},
-        {"name": "🎯 漏网之鱼", "type": "select", "proxies": ["🚀 节点选择", "🎯 直连", "📌 自动选择"]},
-        {"name": "🎯 直连", "type": "select", "proxies": ["DIRECT"]},
-        {"name": "🛑 拦截", "type": "select", "proxies": ["REJECT"]}
-    ],
-    "rules": [
-        "GEOIP,LAN,🎯 直连",
-        "GEOIP,CN,🎯 直连",
-        "MATCH,🎯 漏网之鱼"
-    ],
-    "rule-providers": {
-        "LocalAreaNetwork": {
-            "type": "http",
-            "behavior": "domain",
-            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/LocalAreaNetwork.list",
-            "path": "./rules/LocalAreaNetwork.list",
-            "interval": 86400
-        },
-        "UnBan": {
-            "type": "http",
-            "behavior": "domain",
-            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/UnBan.list",
-            "path": "./rules/UnBan.list",
-            "interval": 86400
-        },
-        "BanAD": {
-            "type": "http",
-            "behavior": "domain",
-            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/BanAD.list",
-            "path": "./rules/BanAD.list",
-            "interval": 86400
-        },
-        "Google": {
-            "type": "http",
-            "behavior": "domain",
-            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Google.list",
-            "path": "./rules/Google.list",
-            "interval": 86400
-        },
-        "Telegram": {
-            "type": "http",
-            "behavior": "domain",
-            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Telegram.list",
-            "path": "./rules/Telegram.list",
-            "interval": 86400
-        }
-    }
-}
-
-# 扩展全量规则列表，插入顶部
-FULL_RULES = [
-    "RULE-SET,LocalAreaNetwork,🎯 直连",
-    "RULE-SET,UnBan,🎯 直连",
-    "RULE-SET,BanAD,🛑 广告拦截",
-    "RULE-SET,Google,🌍 谷歌服务",
-    "RULE-SET,Telegram,📲 极简 Telegram",
-    "GEOIP,CN,🎯 直连",
-    "MATCH,🎯 漏网之鱼"
-]
-
-# ==================== 2. 节点解析逻辑 ====================
+# ==================== 1. 各协议解析引擎 ====================
 
 def parse_ss_url(ss_url):
     try:
@@ -215,7 +134,7 @@ def extract_proxies(raw_text):
 
     return proxies
 
-# ==================== 3. 主程序逻辑 ====================
+# ==================== 2. 主程序逻辑 ====================
 
 source_input = st.text_area(
     "粘贴 机场订阅 URL / SS/VLESS 链接 / YAML 配置文本：",
@@ -223,11 +142,11 @@ source_input = st.text_area(
     placeholder="在此粘贴节点数据或链接..."
 )
 
-if st.button("🚀 强力生成 ACL4SSR 配置文件", use_container_width=True):
+if st.button("🚀 生成优化版 Clash 配置文件", use_container_width=True):
     if not source_input.strip():
         st.error("请输入有效的订阅链接或节点！")
     else:
-        with st.spinner("正在组装分流策略组结构..."):
+        with st.spinner("正在精准构建策略组..."):
             proxies = extract_proxies(source_input)
             
             if not proxies:
@@ -245,29 +164,142 @@ if st.button("🚀 强力生成 ACL4SSR 配置文件", use_container_width=True)
                         count += 1
                     node_names.append(p["name"])
 
-                st.success(f"成功导入 {len(node_names)} 个有效节点！")
+                st.success(f"成功提取 {len(node_names)} 个有效节点！")
 
-                # 构建终极 YAML 结构
-                import copy
-                final_config = copy.deepcopy(BASE_ACL4SSR_CONFIG)
-                final_config["proxies"] = proxies
-                final_config["rules"] = FULL_RULES
-
-                # 注入节点名称至所有策略组
-                builtin = ["DIRECT", "REJECT"]
-                for group in final_config["proxy-groups"]:
-                    # 保留策略组自身对其他组或内置词的引用
-                    existing_refs = [p for p in group["proxies"] if p != "DIRECT" and p != "REJECT"]
-                    
-                    # 给绝大部分组塞入你解析出的节点
-                    if group["name"] not in ["🎯 直连", "🛑 拦截"]:
-                        group["proxies"] = node_names + existing_refs + ["DIRECT"]
+                # 构建科学、严谨的 ACL4SSR 策略组结构
+                final_config = {
+                    "mixed-port": 7890,
+                    "allow-lan": True,
+                    "mode": "rule",
+                    "log-level": "info",
+                    "external-controller": "127.0.0.1:9090",
+                    "dns": {
+                        "enable": True,
+                        "enhanced-mode": "redir-host",
+                        "nameserver": ["223.5.5.5", "119.29.29.29", "1.1.1.1"]
+                    },
+                    "proxies": proxies,
+                    "proxy-groups": [
+                        # 1. 核心选择组：第一项为“📌 自动选择”，确保默认选中最快节点；随后跟具体的节点，最后支持手选直连/拦截
+                        {
+                            "name": "🚀 节点选择",
+                            "type": "select",
+                            "proxies": ["📌 自动选择"] + node_names + ["🎯 直连", "🛑 拦截"]
+                        },
+                        # 2. 自动选择组：【关键修正】只包含真实节点列表，绝对不含 DIRECT，按延迟延迟自动切最低者
+                        {
+                            "name": "📌 自动选择",
+                            "type": "url-test",
+                            "url": "http://www.gstatic.com/generate_204",
+                            "interval": 300,
+                            "tolerance": 50,
+                            "proxies": copy.deepcopy(node_names)
+                        },
+                        # 3. 哔哩哔哩：【关键修正】默认第一项就是“🎯 直连”，不需要走代理；备选方案提供节点选择
+                        {
+                            "name": "🎬 哔哩哔哩",
+                            "type": "select",
+                            "proxies": ["🎯 直连", "🚀 节点选择"]
+                        },
+                        # 4. 其他业务/流媒体策略组：【关键修正】默认第一项全为“🚀 节点选择”，实现自动继承主节点的选线逻辑
+                        {
+                            "name": "🎥 国外媒体",
+                            "type": "select",
+                            "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"] + node_names
+                        },
+                        {
+                            "name": "🌍 谷歌服务",
+                            "type": "select",
+                            "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"] + node_names
+                        },
+                        {
+                            "name": "📲 极简 Telegram",
+                            "type": "select",
+                            "proxies": ["🚀 节点选择", "📌 自动选择", "🎯 直连"] + node_names
+                        },
+                        {
+                            "name": "🛑 广告拦截",
+                            "type": "select",
+                            "proxies": ["🛑 拦截", "🎯 直连", "🚀 节点选择"]
+                        },
+                        {
+                            "name": "🎯 漏网之鱼",
+                            "type": "select",
+                            "proxies": ["🚀 节点选择", "🎯 直连", "📌 自动选择"] + node_names
+                        },
+                        # 5. 基础基础兜底组
+                        {
+                            "name": "🎯 直连",
+                            "type": "select",
+                            "proxies": ["DIRECT"]
+                        },
+                        {
+                            "name": "🛑 拦截",
+                            "type": "select",
+                            "proxies": ["REJECT"]
+                        }
+                    ],
+                    "rules": [
+                        "RULE-SET,LocalAreaNetwork,🎯 直连",
+                        "RULE-SET,UnBan,🎯 直连",
+                        "RULE-SET,BanAD,🛑 广告拦截",
+                        "RULE-SET,Bilibili,🎬 哔哩哔哩",
+                        "RULE-SET,Google,🌍 谷歌服务",
+                        "RULE-SET,Telegram,📲 极简 Telegram",
+                        "GEOIP,CN,🎯 直连",
+                        "MATCH,🎯 漏网之鱼"
+                    ],
+                    "rule-providers": {
+                        "LocalAreaNetwork": {
+                            "type": "http",
+                            "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/LocalAreaNetwork.list",
+                            "path": "./rules/LocalAreaNetwork.list",
+                            "interval": 86400
+                        },
+                        "UnBan": {
+                            "type": "http",
+                            "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/UnBan.list",
+                            "path": "./rules/UnBan.list",
+                            "interval": 86400
+                        },
+                        "BanAD": {
+                            "type": "http",
+                            "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/BanAD.list",
+                            "path": "./rules/BanAD.list",
+                            "interval": 86400
+                        },
+                        "Bilibili": {
+                            "type": "http",
+                            "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Bilibili.list",
+                            "path": "./rules/Bilibili.list",
+                            "interval": 86400
+                        },
+                        "Google": {
+                            "type": "http",
+                            "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Google.list",
+                            "path": "./rules/Google.list",
+                            "interval": 86400
+                        },
+                        "Telegram": {
+                            "type": "http",
+                            "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Telegram.list",
+                            "path": "./rules/Telegram.list",
+                            "interval": 86400
+                        }
+                    }
+                }
 
                 # 输出标准的 YAML 文本
                 final_yaml = yaml.dump(final_config, allow_unicode=True, sort_keys=False)
 
                 st.write("---")
-                st.subheader("🎉 生产完成！ACL4SSR 组别逻辑已注入")
+                st.subheader("🎉 完美转换完成！已校准默认选项逻辑")
                 
                 st.download_button(
                     label="💾 点击下载配置文件 (clash_meta_acl4ssr.yaml)",
@@ -277,10 +309,11 @@ if st.button("🚀 强力生成 ACL4SSR 配置文件", use_container_width=True)
                     use_container_width=True
                 )
                 
-                st.write("### 策略组树状逻辑验证：")
+                st.write("### 核心策略默认选项状态预览：")
                 st.json({
-                    "模式": final_config["mode"],
-                    "导入的节点数": len(proxies),
-                    "策略组数": len(final_config["proxy-groups"]),
-                    "策略组包含列表": [g["name"] for g in final_config["proxy-groups"]]
+                    "🚀 节点选择 (默认激活)": final_config["proxy-groups"][0]["proxies"][0],
+                    "📌 自动选择 (节点池大小)": len(final_config["proxy-groups"][1]["proxies"]),
+                    "🎬 哔哩哔哩 (默认激活)": final_config["proxy-groups"][2]["proxies"][0],
+                    "🎥 国外媒体 (默认激活)": final_config["proxy-groups"][3]["proxies"][0],
+                    "🌍 谷歌服务 (默认激活)": final_config["proxy-groups"][4]["proxies"][0]
                 })
