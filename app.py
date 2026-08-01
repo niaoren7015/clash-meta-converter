@@ -1,165 +1,249 @@
 import streamlit as st
 import yaml
 import requests
+import base64
+import re
+from urllib.parse import urlparse, parse_qs, unquote
 
 st.set_page_config(
-    page_title="Clash Meta (Mihomo) 订阅转换工具",
+    page_title="Clash Meta (Mihomo) 全能订阅转换工具",
     page_icon="🛡️",
     layout="wide"
 )
 
-st.title("🛡️ Clash Meta (Mihomo) 规则注入工具")
-st.caption("完美支持 VLESS / REALITY 等新协议，一键注入 ACL4SSR 分流模板并生成 .yaml 文件")
+st.title("🛡️ Clash Meta (Mihomo) 全能订阅转换工具")
+st.caption("支持直接粘贴 vless:// 链接、机场订阅 URL 或 YAML 节点，一键注入 ACL4SSR 分流模板")
 
-# 侧边栏说明
+# ----------------- 帮助函数：解析 vless:// 链接 -----------------
+def parse_vless_url(vless_url):
+    """将单条 vless:// 字符串解析为 Clash Meta 代理节点字典"""
+    try:
+        if not vless_url.startswith("vless://"):
+            return None
+        
+        # 处理 tag/备注 (即 # 后面的名字)
+        main_part = vless_url[8:]
+        name = "VLESS 节点"
+        if "#" in main_part:
+            main_part, name = main_part.split("#", 1)
+            name = unquote(name)
+
+        # 解析 userinfo @ host:port
+        if "@" not in main_part:
+            return None
+        uuid, host_port = main_part.split("@", 1)
+        
+        # 解析 host, port 和 query 参数
+        if "?" in host_port:
+            server_port, query_str = host_port.split("?", 1)
+        else:
+            server_port = host_port
+            query_str = ""
+
+        if ":" not in server_port:
+            return None
+        server, port = server_port.split(":", 1)
+        
+        params = parse_qs(query_str)
+        
+        # 提取参数值
+        def get_param(key, default=""):
+            return params.get(key, [default])[0]
+
+        network = get_param("type", "tcp")
+        security = get_param("security", "")
+        sni = get_param("sni", get_param("peer", server))
+        fp = get_param("fp", "chrome")
+        pbk = get_param("pbk", "")
+        sid = get_param("sid", "")
+        path = get_param("path", "/")
+        host = get_param("host", "")
+
+        # 构建 Mihomo / Clash Meta vless 配置结构
+        proxy = {
+            "name": name,
+            "type": "vless",
+            "server": server,
+            "port": int(port),
+            "uuid": uuid,
+            "cipher": "auto",
+            "udp": True,
+            "tls": security in ["tls", "reality"],
+            "servername": sni if security in ["tls", "reality"] else None,
+            "client-fingerprint": fp if fp else "chrome"
+        }
+
+        # 清理 None 字段
+        proxy = {k: v for k, v in proxy.items() if v is not None}
+
+        # REALITY 配置
+        if security == "reality":
+            proxy["reality-opts"] = {}
+            if pbk:
+                proxy["reality-opts"]["public-key"] = pbk
+            if sid:
+                proxy["reality-opts"]["short-id"] = sid
+
+        # 传输层配置 (ws, grpc 等)
+        if network == "ws":
+            proxy["network"] = "ws"
+            proxy["ws-opts"] = {"path": path}
+            if host:
+                proxy["ws-opts"]["headers"] = {"Host": host}
+        elif network == "grpc":
+            proxy["network"] = "grpc"
+            grpc_service = get_param("serviceName", "")
+            proxy["grpc-opts"] = {"grpc-service-name": grpc_service}
+        elif network == "h2":
+            proxy["network"] = "h2"
+            proxy["h2-opts"] = {"path": path, "host": [host] if host else []}
+
+        return proxy
+    except Exception as e:
+        return None
+
+# ----------------- 帮助函数：多格式解析器 -----------------
+def parse_input_to_proxies(raw_text):
+    raw_text = raw_text.strip()
+    proxies = []
+
+    # 1. 尝试作为 HTTP/HTTPS 机场订阅链接读取
+    if raw_text.startswith("http://") or raw_text.startswith("https://"):
+        headers = {'User-Agent': 'ClashMeta'}
+        resp = requests.get(raw_text, headers=headers, timeout=15)
+        raw_text = resp.text.strip()
+
+    # 2. 尝试判断是否为 Base64 编码的链接列表（常见于普通机场订阅）
+    try:
+        decoded_text = base64.b64decode(raw_text).decode('utf-8', errors='ignore')
+        if "vless://" in decoded_text or "vmess://" in decoded_text or "ss://" in decoded_text:
+            raw_text = decoded_text
+    except Exception:
+        pass
+
+    # 3. 逐行解析 vless:// 链接或寻找 YAML 块
+    lines = raw_text.splitlines()
+    vless_found = False
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith("vless://"):
+            p = parse_vless_url(line)
+            if p:
+                proxies.append(p)
+                vless_found = True
+
+    # 4. 如果没有找到单独的 vless:// 链接，尝试解析为标准的 YAML/Clash 格式
+    if not vless_found:
+        try:
+            parsed_yaml = yaml.safe_load(raw_text)
+            if isinstance(parsed_yaml, dict) and "proxies" in parsed_yaml:
+                proxies = parsed_yaml["proxies"]
+            elif isinstance(parsed_yaml, list):
+                proxies = parsed_yaml
+        except Exception:
+            pass
+
+    return proxies
+
+# ----------------- Streamlit UI 主界面 -----------------
+
 with st.sidebar:
     st.header("⚙️ 转换配置")
     template_type = st.selectbox(
         "选择分流模板",
         ["ACL4SSR 精简版", "ACL4SSR 全规则版", "自定义 YAML 模板 URL"]
     )
-    
     custom_url = ""
     if template_type == "自定义 YAML 模板 URL":
         custom_url = st.text_input("请输入模板 URL:")
 
-    st.markdown("---")
-    st.markdown("""
-    **💡 使用指南：**
-    1. 粘贴包含 `proxies:` 的 YAML 文本。
-    2. 选择你需要的 ACL4SSR 分流模式。
-    3. 点击转换，直接下载 `.yaml` 配置文件。
-    4. 将文件导入 Clash Verge / Clash Meta (Mihomo) 客户端即可。
-    """)
+st.write("### 输入节点或订阅")
+source_input = st.text_area(
+    "支持粘贴以下任意形式：\n1. 机场 HTTP 订阅链接 (如 https://...)\n2. 单条或多条 vless:// 节点链接\n3. 包含 proxies 的 Clash YAML 节点文本",
+    height=250,
+    placeholder="""可以直接粘贴：
+https://my-airport.com/api/v1/client/subscribe?token=xxxx
 
-# 主界面：输入区
-col1, col2 = st.columns(2)
+或者粘贴单/多行节点链接：
+vless://uuid@example.com:443?security=reality&sni=google.com&fp=chrome&pbk=xxxx#节点名称
 
-with col1:
-    source_raw = st.text_area(
-        "1. 粘贴节点数据 (支持 VLESS / SS / Trojan 等 YAML 格式):",
-        height=350,
-        placeholder="""proxies:
-  - name: "VLESS-Reality-Node"
-    type: vless
-    server: example.com
-    port: 443
-    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    cipher: auto
-    tls: true
-    servername: example.com
-    reality-opts:
-      public-key: xxxxxx
-    network: ws"""
-    )
+或者粘贴 YAML 代码块..."""
+)
 
-with col2:
-    template_raw = st.text_area(
-        "2. (可选) 粘贴自定义 ACL4 策略模板 YAML 内容:",
-        height=350,
-        help="如果左侧侧边栏没有勾选自定义 URL，且此处为空，系统将自动拉取官方最新 ACL4SSR 模板。"
-    )
-
-# 转换按钮
-if st.button("🚀 开始转换并生成 Clash Meta 配置文件", use_container_width=True):
-    if not source_raw.strip():
-        st.error("请先在左侧输入框粘贴节点数据！")
+if st.button("🚀 开始解析并生成 Clash Meta 配置", use_container_width=True):
+    if not source_input.strip():
+        st.error("请输入节点信息或订阅链接！")
     else:
-        try:
-            # 1. 解析节点 YAML
-            source_config = yaml.safe_load(source_raw)
-            
-            # 兼容处理：支持直接粘贴包含 proxies 的字典，或纯节点列表
-            if isinstance(source_config, dict) and "proxies" in source_config:
-                proxies = source_config["proxies"]
-            elif isinstance(source_config, list):
-                proxies = source_config
-            else:
-                st.error("解析失败：输入的节点数据格式不正确，必须包含 `proxies:` 列表。")
-                st.stop()
-
-            node_names = [p["name"] for p in proxies if isinstance(p, dict) and "name" in p]
-            
-            if not node_names:
-                st.error("未找到有效的节点信息。")
-                st.stop()
+        with st.spinner("正在解析节点并下载 ACL4SSR 分流模板..."):
+            try:
+                # 1. 解析节点
+                proxies = parse_input_to_proxies(source_input)
                 
-            st.success(f"成功提取 {len(node_names)} 个节点（已识别 VLESS 及其他协议）！")
+                if not proxies:
+                    st.error("无法解析输入的节点数据！请确认是否为有效的 vless:// 链接、机场订阅或 YAML 内容。")
+                    st.stop()
+                
+                node_names = [p["name"] for p in proxies if isinstance(p, dict) and "name" in p]
+                st.success(f"成功识别并转化了 {len(node_names)} 个节点！")
 
-            # 2. 获取策略模板
-            template_config = None
-            
-            # 优先使用用户在右侧文本框手动粘贴的模板
-            if template_raw.strip():
-                template_config = yaml.safe_load(template_raw)
-            else:
-                # 否则从网络下载在线模板
-                st.info("正在获取在线 ACL4SSR 策略基底...")
+                # 2. 下载 ACL4SSR 模板
                 if template_type == "ACL4SSR 精简版":
                     target_url = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/GeneralClashConfig.yml"
                 elif template_type == "ACL4SSR 全规则版":
                     target_url = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/GeneralClashConfig.yml"
                 else:
                     target_url = custom_url
-                
-                if not target_url:
-                    st.error("请输入有效的自定义模板 URL。")
-                    st.stop()
-                    
+
                 resp = requests.get(target_url, timeout=10)
                 template_config = yaml.safe_load(resp.text)
 
-            # 3. 注入节点与组逻辑
-            new_config = template_config.copy()
-            new_config["proxies"] = proxies
+                # 3. 注入节点到策略组
+                new_config = template_config.copy()
+                new_config["proxies"] = proxies
 
-            builtin = ["DIRECT", "REJECT", "no-resolve"]
-            groups = new_config.get("proxy-groups", [])
-            group_names = [g["name"] for g in groups]
+                builtin = ["DIRECT", "REJECT", "no-resolve"]
+                groups = new_config.get("proxy-groups", [])
+                group_names = [g["name"] for g in groups]
 
-            # 将节点注入到策略组中
-            for g in groups:
-                current_proxies = g.get("proxies", [])
-                # 保留策略组对其他组的引用和内置指令
-                new_group_proxies = [p for p in current_proxies if p in builtin or p in group_names]
-                
-                # 定义需要自动塞入全部节点的组名称关键字
-                core_keywords = ['节点', 'Proxy', '加速', '选择', 'Select', 'Default', '自动', '漏网之鱼']
-                if any(k in g['name'] for k in core_keywords) or len(new_group_proxies) < len(current_proxies):
-                    g['proxies'] = node_names + new_group_proxies
-                else:
-                    g['proxies'] = new_group_proxies
-
-            # 4. 清理无效/空引用，防止 Mihomo 报错
-            valid_targets = set(node_names + builtin + group_names)
-            for _ in range(3):
-                active_groups = []
                 for g in groups:
-                    g['proxies'] = [p for p in g['proxies'] if p in valid_targets]
-                    if len(g['proxies']) > 0:
-                        active_groups.append(g['name'])
-                valid_targets = set(node_names + builtin + active_groups)
-                groups = [g for g in groups if len(g['proxies']) > 0]
-            
-            new_config['proxy-groups'] = groups
+                    current_proxies = g.get("proxies", [])
+                    new_group_proxies = [p for p in current_proxies if p in builtin or p in group_names]
+                    
+                    core_keywords = ['节点', 'Proxy', '加速', '选择', 'Select', 'Default', '自动', '漏网之鱼']
+                    if any(k in g['name'] for k in core_keywords) or len(new_group_proxies) < len(current_proxies):
+                        g['proxies'] = node_names + new_group_proxies
+                    else:
+                        g['proxies'] = new_group_proxies
 
-            # 5. 生成 YAML 输出
-            final_yaml = yaml.dump(new_config, allow_unicode=True, sort_keys=False)
+                # 4. 清理空组
+                valid_targets = set(node_names + builtin + group_names)
+                for _ in range(3):
+                    active_groups = []
+                    for g in groups:
+                        g['proxies'] = [p for p in g['proxies'] if p in valid_targets]
+                        if len(g['proxies']) > 0:
+                            active_groups.append(g['name'])
+                    valid_targets = set(node_names + builtin + active_groups)
+                    groups = [g for g in groups if len(g['proxies']) > 0]
+                
+                new_config['proxy-groups'] = groups
 
-            st.write("---")
-            st.subheader("🎉 转换完成")
-            
-            # 提供下载
-            st.download_button(
-                label="💾 点击下载 Clash Meta 配置文件 (.yaml)",
-                data=final_yaml,
-                file_name="clash_meta_acl4ssr.yaml",
-                mime="text/yaml",
-                use_container_width=True
-            )
+                # 5. 生成结果
+                final_yaml = yaml.dump(new_config, allow_unicode=True, sort_keys=False)
 
-            with st.expander("🔍 预览生成的 YAML 内容 (部分)"):
-                st.code(final_yaml[:1500] + "\n\n... (后续规则已隐藏，请直接下载文件)", language="yaml")
+                st.write("---")
+                st.subheader("🎉 转换完成")
+                st.download_button(
+                    label="💾 点击下载 Clash Meta 配置文件 (.yaml)",
+                    data=final_yaml,
+                    file_name="clash_meta_acl4ssr.yaml",
+                    mime="text/yaml",
+                    use_container_width=True
+                )
+                
+                with st.expander("🔍 预览解析出的代理节点 (YAML 格式)"):
+                    st.code(yaml.dump({"proxies": proxies}, allow_unicode=True, sort_keys=False), language="yaml")
 
-        except Exception as e:
-            st.error(f"处理过程中发生错误: {str(e)}")
+            except Exception as e:
+                st.error(f"处理失败，原因: {str(e)}")
