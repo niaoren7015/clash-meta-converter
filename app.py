@@ -182,9 +182,16 @@ def extract_proxies_strictly(raw_text):
 
 source_input = st.text_area(
     "粘贴 订阅 URL / SS/VLESS 链接 / YAML 配置文本：",
-    height=220,
+    height=200,
     placeholder="在此粘贴原订阅链接或节点数据..."
 )
+
+# ----------------- 新增功能：设置订阅文件名称 -----------------
+custom_filename = st.text_input(
+    "🏷️ 设置导出的文件名（可选）：",
+    value="fast_clash_geo",
+    placeholder="无需后缀，例如：jms_config，默认 fast_clash_geo"
+).strip()
 
 if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_width=True):
     if not source_input.strip():
@@ -261,11 +268,16 @@ if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_
 
                 st.write("---")
                 st.subheader("🎉 制作完成")
+
+                # ----------------- 格式化输出文件名 -----------------
+                export_name = custom_filename if custom_filename else "fast_clash_geo"
+                if not export_name.endswith(".yaml") and not export_name.endswith(".yml"):
+                    export_name += ".yaml"
                 
                 st.download_button(
-                    label="💾 点击下载轻量 GEO 配置文件 (.yaml)",
+                    label=f"💾 点击下载配置文件 ({export_name})",
                     data=final_yaml,
-                    file_name="fast_clash_geo.yaml",
+                    file_name=export_name,
                     mime="text/yaml",
                     use_container_width=True
                 )
