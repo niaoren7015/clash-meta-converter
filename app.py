@@ -39,7 +39,7 @@ LOCAL_GEO_RULES = [
     "MATCH,🎯 漏网之鱼"
 ]
 
-# ==================== 2. 安全节点提取逻辑（强化 VLESS 支持） ====================
+# ==================== 2. 安全节点提取逻辑 ====================
 
 def parse_ss_url(ss_url):
     """解析 ss:// 链接"""
@@ -78,7 +78,7 @@ def parse_ss_url(ss_url):
     except: return None
 
 def parse_vless_url(vless_url):
-    """修复版：深度精准提取 vless:// 链接，完全匹配 Clash Meta 要求"""
+    """深度精准提取 vless:// 链接，完全匹配 Clash Meta 要求"""
     try:
         if not vless_url.startswith("vless://"): return None
         main_part = vless_url[8:]
@@ -107,7 +107,6 @@ def parse_vless_url(vless_url):
         host = get_p("host", "")
         flow = get_p("flow", "")
 
-        # 核心变动：Clash Meta 中 VLESS 的 cipher 建议填 none
         proxy = {
             "name": name, 
             "type": "vless", 
@@ -127,13 +126,11 @@ def parse_vless_url(vless_url):
         if sni and security in ["tls", "reality"]:
             proxy["servername"] = sni
 
-        # REALITY 特有配置
         if security == "reality":
             proxy["reality-opts"] = {}
             if pbk: proxy["reality-opts"]["public-key"] = pbk
             if sid: proxy["reality-opts"]["short-id"] = sid
 
-        # 传输层配置
         if network == "ws":
             proxy["network"] = "ws"
             proxy["ws-opts"] = {"path": path}
@@ -292,4 +289,4 @@ if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_
                 )
                 
                 with st.expander("🔍 节点详细 YAML 参数校验（可在此检查 VLESS 字段是否完整）"):
-                    st.yaml(proxies)
+                    st.code(yaml.dump(proxies, allow_unicode=True, sort_keys=False), language="yaml")
