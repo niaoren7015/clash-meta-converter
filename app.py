@@ -28,7 +28,6 @@ BASE_CONFIG = {
     }
 }
 
-# 使用 Clash Meta 内核自带的 GEO 数据库，无任何 rule-providers 远程下载，已移除 Bilibili 策略
 LOCAL_GEO_RULES = [
     "GEOIP,LAN,🎯 直连",
     "GEOSITE,cn,🎯 直连",
@@ -40,10 +39,10 @@ LOCAL_GEO_RULES = [
     "MATCH,🎯 漏网之鱼"
 ]
 
-# ==================== 2. 安全节点提取逻辑（防 IP 篡改 & 参数丢失） ====================
+# ==================== 2. 安全节点提取逻辑（强化 VLESS 支持） ====================
 
 def parse_ss_url(ss_url):
-    """解析 ss:// 链接，严格保留 server 地址"""
+    """解析 ss:// 链接"""
     try:
         if not ss_url.startswith("ss://"): return None
         main_part = ss_url[5:]
@@ -79,7 +78,7 @@ def parse_ss_url(ss_url):
     except: return None
 
 def parse_vless_url(vless_url):
-    """解析 vless:// 链接，完整保留 REALITY/WS/gRPC/SNI 参数"""
+    """修复版：深度精准提取 vless:// 链接，完全匹配 Clash Meta 要求"""
     try:
         if not vless_url.startswith("vless://"): return None
         main_part = vless_url[8:]
@@ -98,47 +97,64 @@ def parse_vless_url(vless_url):
         
         def get_p(k, default=""): return params.get(k, [default])[0]
 
-        network, security = get_p("type", "tcp"), get_p("security", "")
-        sni, fp = get_p("sni", get_p("peer", server)), get_p("fp", "chrome")
-        pbk, sid = get_p("pbk", ""), get_p("sid", "")
-        path, host = get_p("path", "/"), get_p("host", "")
+        network = get_p("type", "tcp")
+        security = get_p("security", "none")
+        sni = get_p("sni", get_p("peer", server))
+        fp = get_p("fp", "chrome")
+        pbk = get_p("pbk", "")
+        sid = get_p("sid", "")
+        path = urllib.parse.unquote(get_p("path", "/"))
+        host = get_p("host", "")
+        flow = get_p("flow", "")
 
+        # 核心变动：Clash Meta 中 VLESS 的 cipher 建议填 none
         proxy = {
-            "name": name, "type": "vless", "server": server.strip(), "port": int(port),
-            "uuid": uuid, "cipher": "auto", "udp": True,
+            "name": name, 
+            "type": "vless", 
+            "server": server.strip(), 
+            "port": int(port),
+            "uuid": uuid, 
+            "cipher": "none", 
+            "udp": True,
             "tls": security in ["tls", "reality"],
             "skip-cert-verify": True,
-            "servername": sni if security in ["tls", "reality"] else None,
             "client-fingerprint": fp if fp else "chrome"
         }
 
+        if flow:
+            proxy["flow"] = flow
+
+        if sni and security in ["tls", "reality"]:
+            proxy["servername"] = sni
+
+        # REALITY 特有配置
         if security == "reality":
             proxy["reality-opts"] = {}
             if pbk: proxy["reality-opts"]["public-key"] = pbk
             if sid: proxy["reality-opts"]["short-id"] = sid
 
+        # 传输层配置
         if network == "ws":
             proxy["network"] = "ws"
             proxy["ws-opts"] = {"path": path}
             if host: proxy["ws-opts"]["headers"] = {"Host": host}
         elif network == "grpc":
             proxy["network"] = "grpc"
-            proxy["grpc-opts"] = {"grpc-service-name": get_p("serviceName", "")}
+            proxy["grpc-opts"] = {"grpc-service-name": get_p("serviceName", get_p("grpc-service-name", ""))}
 
-        return {k: v for k, v in proxy.items() if v is not None}
-    except: return None
+        return {k: v for k, v in proxy.items() if v is not None and v != ""}
+    except Exception as e:
+        return None
 
 def extract_proxies_strictly(raw_text):
     """最严格的节点提取：对原 YAML 节点进行原样深拷贝，绝对零改动"""
     raw_text = raw_text.strip()
     
-    # 1. 如果是 HTTP/HTTPS 链接，网络拉取
     if raw_text.startswith("http://") or raw_text.startswith("https://"):
         req = urllib.request.Request(raw_text, headers={'User-Agent': 'ClashMeta/1.16.0 Subconverter'})
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw_text = resp.read().decode('utf-8').strip()
 
-    # 2. 尝试 Base64 解码
     try:
         decoded = base64.b64decode(raw_text + '===').decode('utf-8', errors='ignore')
         if any(proto in decoded for proto in ["vless://", "ss://", "vmess://", "proxies:"]):
@@ -147,7 +163,6 @@ def extract_proxies_strictly(raw_text):
 
     raw_proxies = []
 
-    # 3. 优先解析原生的 YAML/Clash 格式 (官方订阅原生数据)
     try:
         parsed_yaml = yaml.safe_load(raw_text)
         if isinstance(parsed_yaml, dict) and "proxies" in parsed_yaml:
@@ -156,7 +171,6 @@ def extract_proxies_strictly(raw_text):
             raw_proxies = parsed_yaml
     except: pass
 
-    # 4. 如果不是 YAML，再逐行解包 ss:// 和 vless://
     if not raw_proxies:
         for line in raw_text.splitlines():
             line = line.strip()
@@ -167,7 +181,6 @@ def extract_proxies_strictly(raw_text):
                 p = parse_vless_url(line)
                 if p: raw_proxies.append(p)
 
-    # 5. 【防御核心】原样深拷贝节点字典，绝对不允许篡改任何 server 或底层属性
     cleaned_proxies = []
     for p in raw_proxies:
         if not isinstance(p, dict): continue
@@ -186,7 +199,6 @@ source_input = st.text_area(
     placeholder="在此粘贴原订阅链接或节点数据..."
 )
 
-# ----------------- 新增功能：设置订阅文件名称 -----------------
 custom_filename = st.text_input(
     "🏷️ 设置导出的文件名（可选）：",
     value="fast_clash_geo",
@@ -203,7 +215,6 @@ if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_
             if not proxies:
                 st.error("未能提取到有效节点！请检查粘贴内容。")
             else:
-                # 确保节点的名称唯一（避免同名导致测速 Timeout）
                 seen_names = set()
                 node_names = []
                 for p in proxies:
@@ -219,7 +230,6 @@ if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_
 
                 st.success(f"成功导入 {len(node_names)} 个节点！已 100% 保持原始服务器信息。")
 
-                # 构建最终配置（精简策略组）
                 final_config = copy.deepcopy(BASE_CONFIG)
                 final_config["proxies"] = proxies
                 final_config["proxy-groups"] = [
@@ -269,7 +279,6 @@ if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_
                 st.write("---")
                 st.subheader("🎉 制作完成")
 
-                # ----------------- 格式化输出文件名 -----------------
                 export_name = custom_filename if custom_filename else "fast_clash_geo"
                 if not export_name.endswith(".yaml") and not export_name.endswith(".yml"):
                     export_name += ".yaml"
@@ -282,5 +291,5 @@ if st.button("🚀 生成本地 GEO 零加载延迟配置文件", use_container_
                     use_container_width=True
                 )
                 
-                with st.expander("🔍 节点 Server 信息校验 (对照原始数据，验证是否被篡改)"):
-                    st.json([{"name": p["name"], "server": p["server"], "port": p["port"]} for p in proxies])
+                with st.expander("🔍 节点详细 YAML 参数校验（可在此检查 VLESS 字段是否完整）"):
+                    st.yaml(proxies)
